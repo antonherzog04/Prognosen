@@ -1,0 +1,78 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MatchPilot</title><style>*{box-sizing:border-box}body{margin:0;background:#0b130f;color:#e8f2ec;font:15px/1.4 system-ui,sans-serif}button,input{font:inherit;color:inherit}button{background:#14261c;border:1px solid #1f3a2b;border-radius:8px;padding:10px 12px;cursor:pointer}button.on{background:#1f8a4c;border-color:#2fb86a}input{background:#102017;border:1px solid #1f3a2b;border-radius:8px;padding:10px}.app{max-width:900px;margin:auto;padding:12px}header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}h1{margin:0}h1 span{color:#2fb86a}nav,.date,.filters{display:flex;gap:4px;flex-wrap:wrap}.bar{display:flex;flex-direction:column;gap:8px;margin:12px 0}.meta{color:#8aa597;font-size:12px}h2{font-size:14px;color:#2fb86a;margin:18px 0 6px}.card{display:grid;grid-template-columns:72px 1fr 40px;gap:8px;width:100%;text-align:left;margin-bottom:4px;align-items:center}.card.in{border-color:#e5484d;background:#1d1a1a}.tm,.sc{display:flex;flex-direction:column}.sc{text-align:right;font-weight:700}.w{font-weight:700}.live{color:#ff6369}.box{padding:16px;border:1px solid #1f3a2b;border-radius:10px;margin:12px 0}.err{border-color:#e5484d}.warn{border-color:#d9a400}#modal{position:fixed;inset:0;background:#000a;display:flex;align-items:flex-end;justify-content:center}#modal[hidden]{display:none}.sheet{background:#0f1c15;max-width:700px;width:100%;max-height:90vh;overflow:auto;padding:16px;border-radius:14px 14px 0 0;position:relative}.x{position:absolute;right:10px;top:10px}.big{font-size:32px;font-weight:800}.small{font-size:12px;color:#8aa597}</style></head><body><div class="app"><header><h1>Match<span>Pilot</span></h1><nav aria-label="Sportarten"><button data-sport="soccer">Fußball</button><button data-sport="basketball">Basketball</button><button data-sport="tennis">Tennis</button></nav></header>
+<section class="bar"><div class="date"><button id="prev" aria-label="Vorheriger Tag">‹</button><input type="date" id="date" aria-label="Datum"><button id="next" aria-label="Nächster Tag">›</button><button id="today">Heute</button></div><input type="search" id="q" placeholder="Team, Spieler oder Wettbewerb suchen"><div class="filters"><button data-f="all">Alle</button><button data-f="in">Live (<span id="livec">0</span>)</button><button data-f="pre">Anstehend</button><button data-f="post">Beendet</button></div></section>
+<p class="meta" id="meta"></p><main id="main"></main></div><div id="modal" hidden><div class="sheet"></div></div><script>
+const TZ="Europe/Berlin",BASE="https://site.api.espn.com/apis/site/v2/sports",TIMEOUT=9000;
+const LEAGUES=[["soccer","soccer","ger.1","Bundesliga"],["soccer","soccer","ger.2","2. Bundesliga"],["soccer","soccer","eng.1","Premier League"],["soccer","soccer","esp.1","LaLiga"],["soccer","soccer","ita.1","Serie A"],["soccer","soccer","fra.1","Ligue 1"],["soccer","soccer","uefa.champions","Champions League"],["basketball","basketball","nba","NBA"],["basketball","basketball","wnba","WNBA"],["tennis","tennis","atp","ATP"],["tennis","tennis","wta","WTA"]].map(([sport,path,slug,name])=>({sport,path,slug,name}));
+const berlinDate=d=>{const x=new Date(d);return isNaN(x)?"":new Intl.DateTimeFormat("en-CA",{timeZone:TZ,year:"numeric",month:"2-digit",day:"2-digit"}).format(x)};
+const todayBerlin=()=>berlinDate(new Date());
+const addDays=(s,n)=>{const[y,m,d]=s.split("-").map(Number);return new Date(Date.UTC(y,m-1,d+n)).toISOString().slice(0,10)};
+const toEspn=s=>s.replaceAll("-","");
+const timeBerlin=i=>{const x=new Date(i);return isNaN(x)?"--:--":new Intl.DateTimeFormat("de-DE",{timeZone:TZ,hour:"2-digit",minute:"2-digit"}).format(x)};
+const stamp=ms=>new Intl.DateTimeFormat("de-DE",{timeZone:TZ,dateStyle:"short",timeStyle:"medium"}).format(new Date(ms));
+class ApiError extends Error{constructor(kind,msg){super(msg);this.kind=kind}}
+async function fetchJson(url,signal){
+  const ctl=new AbortController();let to=false;const t=setTimeout(()=>{to=true;ctl.abort()},TIMEOUT);
+  const ab=()=>ctl.abort();signal&&signal.addEventListener("abort",ab);
+  try{for(let a=0;;a++){let r;
+    try{r=await fetch(url,{signal:ctl.signal})}catch(e){if(to)throw new ApiError("timeout","Zeitüberschreitung (9 s)");if(signal&&signal.aborted)throw new ApiError("aborted","abgebrochen");throw new ApiError("network","Netzwerkfehler oder CORS blockiert die Anfrage")}
+    if((r.status===429||r.status>=500)&&a<1){await new Promise(z=>setTimeout(z,800));continue}
+    if(!r.ok)throw new ApiError("http","HTTP "+r.status+(r.status===429?" (Rate Limit)":""));
+    const tx=await r.text();if(!tx.trim())throw new ApiError("json","Leere Antwort");
+    try{return JSON.parse(tx)}catch{throw new ApiError("json","Ungültige JSON-Antwort")}}
+  }finally{clearTimeout(t);signal&&signal.removeEventListener("abort",ab)}
+}
+function side(c){const n=(c&&c.team&&c.team.displayName)||(c&&c.athlete&&c.athlete.displayName)||(c&&c.team&&c.team.name)||"?";const s=c&&c.score;
+  return{name:String(n),score:(s===undefined||s===null||s==="")?null:String(typeof s==="object"?(s.displayValue??s.value):s),winner:!!(c&&c.winner)}}
+function parseScoreboard(j,lg){
+  if(!j||typeof j!=="object"||!Array.isArray(j.events))throw new ApiError("shape","Unerwartete Antwortstruktur (events fehlt)");
+  const out=[];
+  for(const ev of j.events){
+    const comps=Array.isArray(ev.competitions)&&ev.competitions.length?ev.competitions:(Array.isArray(ev.groupings)?ev.groupings.flatMap(g=>g.competitions||[]):[]);
+    for(const c of comps){const cs=c.competitors||[];if(cs.length!==2)continue;
+      const type=(c.status&&c.status.type)||(ev.status&&ev.status.type)||{};
+      const state=type.state==="in"||type.state==="post"?type.state:"pre";
+      let a=cs.find(x=>x.homeAway==="home"),b=cs.find(x=>x.homeAway==="away");
+      if(!a||!b){const s=[...cs].sort((x,y)=>(x.order||0)-(y.order||0));a=s[0];b=s[1]}
+      const id=String(c.id??ev.id),start=c.date||c.startDate||ev.date;
+      if(!start||isNaN(new Date(start)))continue;
+      out.push({key:lg.slug+":"+id,league:lg,start,state,statusText:type.shortDetail||type.description||"",clock:(c.status&&c.status.displayClock)||"",home:side(a),away:side(b),venue:c.venue&&c.venue.fullName})}}
+  return out}
+const cache=new Map();
+async function pool(items,limit,fn){let i=0;await Promise.all(Array.from({length:Math.min(limit,items.length)},async()=>{while(i<items.length)await fn(items[i++])}))}
+async function loadDay(sport,day,signal,force){
+  const leagues=LEAGUES.filter(l=>l.sport===sport),days=[addDays(day,-1),day,addDays(day,1)];
+  const jobs=leagues.flatMap(l=>days.map(d=>({l,d})));const errors=[],all=[];let cachedAll=true,oldest=Date.now();
+  await pool(jobs,4,async({l,d})=>{if(signal.aborted)return;const ck=l.slug+"|"+d,hit=cache.get(ck);
+    if(!force&&hit&&Date.now()-hit.at<45000){all.push(...hit.data);oldest=Math.min(oldest,hit.at);return}
+    try{const data=parseScoreboard(await fetchJson(`${BASE}/${l.path}/${l.slug}/scoreboard?dates=${toEspn(d)}&limit=300`,signal),l);cache.set(ck,{at:Date.now(),data});cachedAll=false;all.push(...data)}
+    catch(e){if(e.kind!=="aborted"){cachedAll=false;if(!errors.some(x=>x.league===l.name))errors.push({league:l.name,msg:e.message})}}});
+  if(signal.aborted)throw new ApiError("aborted","abgebrochen");
+  const seen=new Set();
+  const matches=all.filter(m=>berlinDate(m.start)===day&&!seen.has(m.key)&&(seen.add(m.key),true)).sort((a,b)=>a.start.localeCompare(b.start));
+  if(!matches.length&&errors.length===leagues.length)throw new ApiError("network","Datenquelle nicht erreichbar: "+errors[0].msg);
+  return{matches,errors,fetchedAt:cachedAll?oldest:Date.now(),fromCache:cachedAll}}
+async function loadHistory(lg,signal,today,back){
+  const j=await fetchJson(`${BASE}/${lg.path}/${lg.slug}/scoreboard?dates=${toEspn(addDays(today,-back))}-${toEspn(today)}&limit=1000`,signal);
+  return parseScoreboard(j,lg).filter(m=>m.state==="post"&&m.home.score!==null&&m.away.score!==null).map(m=>({home:m.home.name,away:m.away.name,hg:Number(m.home.score),ag:Number(m.away.score)})).filter(r=>isFinite(r.hg)&&isFinite(r.ag))}
+/* MODELL */
+const NO_DATA="Nicht genügend Daten für eine verlässliche Prognose";
+const fact=n=>{let r=1;for(let i=2;i<=n;i++)r*=i;return r};
+const poisson=(k,l)=>Math.exp(-l)*Math.pow(l,k)/fact(k);
+function strengths(res,k=4){if(res.length<10)return null;
+  const mh=res.reduce((s,r)=>s+r.hg,0)/res.length,ma=res.reduce((s,r)=>s+r.ag,0)/res.length;if(mh<=0||ma<=0)return null;
+  const mu=(mh+ma)/2,H=Math.sqrt(mh/ma),gf=new Map,ga=new Map,games=new Map,add=(m,t,v)=>m.set(t,(m.get(t)||0)+v);
+  for(const r of res){add(gf,r.home,r.hg);add(ga,r.home,r.ag);add(games,r.home,1);add(gf,r.away,r.ag);add(ga,r.away,r.hg);add(games,r.away,1)}
+  const att=new Map,def=new Map;for(const[t,n]of games){att.set(t,((gf.get(t)||0)+k*mu)/(n+k)/mu);def.set(t,((ga.get(t)||0)+k*mu)/(n+k)/mu)}
+  return{mu,H,att,def,games}}
+function predictFootball(res,home,away,minG=5){const s=strengths(res);if(!s)return{ok:false,reason:NO_DATA};
+  const gh=s.games.get(home)||0,ga=s.games.get(away)||0;
+  if(gh<minG||ga<minG)return{ok:false,reason:`${NO_DATA} (Spiele: ${gh}/${ga}, benötigt je ${minG})`};
+  const lh=s.mu*s.att.get(home)*s.def.get(away)*s.H,la=s.mu*s.att.get(away)*s.def.get(home)/s.H;
+  let h=0,d=0,a=0,o=0,b=0,tot=0;const sc=[];
+  for(let i=0;i<=10;i++)for(let j=0;j<=10;j++){const p=poisson(i,lh)*poisson(j,la);tot+=p;if(i>j)h+=p;else if(i===j)d+=p;else a+=p;if(i+j>2)o+=p;if(i>0&&j>0)b+=p;sc.push({score:i+":"+j,p})}
+  sc.forEach(x=>x.p/=tot);sc.sort((x,y)=>y.p-x.p);
+  return{ok:true,lh,la,pHome:h/tot,pDraw:d/tot,pAway:a/tot,over25:o/tot,btts:b/tot,top:sc.slice(0,3),gh,ga,model:"Poisson (Angriff/Abwehr mit Shrinkage k=4, Heimvorteil aus Ligadaten, ohne Dixon-Coles)"}}
+const erf=x=>{const t=1/(1+0.3275911*Math.abs(x)),y=1-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*Math.exp(-x*x);return x>=0?y:-y};
+const normCdf=z=>0.5*(1+erf(z/Math.SQRT2));
+function predictBasketball(res,home,away,minG=8){if(res.length<30)return{ok:false,reason:NO_DATA};
+  const st=new Map,upd=(t,f,a)=>{const x=st.get(t)||
